@@ -752,10 +752,19 @@ void ifreeunitlist(iunit *unit) {
 #define DimensionW 0
 #define DimensionH 1
 
+
+/* 析构函数 */
+static void _ientryfree_node(struct iref* ref) {
+	iobjfree(ref);
+    /* TODO: do some check if neighbors == NULL and units == NULL */
+}
+
 /* 节点内存管理 */
 inode * imakenode(){
 	inode *node = iobjmalloc(inode);
 	iretain(node);
+    /* 析构函数在这里  */
+    node->free = _ientryfree_node;
 
 	return node;
 }
@@ -768,6 +777,10 @@ void ifreenode(inode *node){
 /* 释放节点包含的单元 */
 void ifreenodekeeper(inode *node) {
 	ifreeunitlist(node->units);
+    node->units = NULL;
+    node->unitcnt = 0;
+    
+    ineighborsclean(node);
 	ifreenode(node);
 }
 
@@ -877,6 +890,18 @@ int justremoveunit(imap *map, inode *node, iunit *unit) {
 				unit->id, unit->code.code, unit->code.pos.x, unit->code.pos.y, node->level, node->code.code, node);\
 	}while(0)
 
+/* 节点坐标生成 */
+typedef struct ipos2i {
+        int x, y;
+}ipos2i;
+static ipos2i __node_offset[] =
+{
+    {0, 0},
+    {0, 1},
+    {1, 0},
+    {1, 1}
+};
+
 /* 加入新的节点 */
 inode* addnodetoparent(imap *map, inode *node, int codei, int idx, icode *code) {
 	/* 创造一个节点 */
@@ -884,6 +909,14 @@ inode* addnodetoparent(imap *map, inode *node, int codei, int idx, icode *code) 
 	child->level = idx+1;
 	child->parent = node;
 	child->codei = codei;
+    /* y */
+    /* ^ */
+    /* | ((0, 1) , (1, 1)) */
+    /* | ((0, 0) , (1, 0)) */
+    /* -----------> x
+     */
+    child->x = node->x * 2 + __node_offset[codei].x;
+    child->y = node->y * 2 + __node_offset[codei].y;
 
 	/* 生成节点编码信息 */
 	copycode(child->code, (*code), child->level);
@@ -911,6 +944,59 @@ inode* addnodetoparent(imap *map, inode *node, int codei, int idx, icode *code) 
 	return child;
 }
 
+/* 
+ * 把节点从 有向图里面拿出来， 没有任何一个节点可以到他
+ */
+void ineighborsclean(inode *node) {
+    irefjoint* joint = NULL;
+    inode *neighbor = NULL;
+    icheck(node);
+    
+    /* disconnect to others */
+    joint = ireflistfirst(node->neighbors_walkable);
+    while (joint) {
+        neighbor = icast(inode, joint->value);
+        ireflistremove(neighbor->neighbors, irefcast(node));
+        joint = joint->next;
+    }
+    ireflistfree(node->neighbors_walkable);
+    node->neighbors_walkable = NULL;
+    
+    /* disconnect from others */
+    joint = ireflistfirst(node->neighbors);
+    while (joint) {
+        neighbor = icast(inode, joint->value);
+        ireflistremove(neighbor->neighbors_walkable, irefcast(node));
+        joint = joint->next;
+    }
+    ireflistfree(node->neighbors);
+    node->neighbors = NULL;
+}
+
+/* 
+ * 没有做重复性的检查
+ * 让 node ==> to
+ */
+void ineighborsadd(inode *node, inode *to) {
+    if (!node->neighbors_walkable) {
+        node->neighbors_walkable = ireflistmake();
+    }
+    ireflistadd(node->neighbors_walkable, irefcast(to));
+    if (!to->neighbors) {
+        to->neighbors = ireflistmake();
+    }
+    ireflistadd(to->neighbors, irefcast(node));
+}
+
+/* 
+ * 没有做重复性的检查 
+ * 让 node !==> to
+ */
+void ineighborsdel(inode *node, inode *to) {
+    ireflistremove(node->neighbors_walkable, irefcast(to));
+    ireflistremove(to->neighbors, irefcast(node));
+}
+
 /* 移除节点 */
 int removenodefromparent(imap *map, inode *node) {
 	icheckret(node, iino);
@@ -936,6 +1022,11 @@ int removenodefromparent(imap *map, inode *node) {
 	node->codei = 0;
 	node->code.code[0] = 0;
 	node->tick = 0;
+    node->x = node->y = 0;
+    node->state = 0;
+    
+    /* 清理 邻居 节点*/
+    ineighborsclean(node);
 
 #if open_node_utick
 	node->utick = 0;
@@ -1363,6 +1454,11 @@ void imapfree(imap *map) {
 	}
     /* 释放节点缓冲区 */
 	irefcachefree(map->nodecache);
+    
+    /* 释放阻挡位图 */
+    if (map->blocks) {
+        ifree(map->blocks);
+    }
 
 	/* 释放地图本身 */
 	iobjfree(map);
@@ -1480,7 +1576,7 @@ inode *imapgetnode(imap *map, icode *code, int level, int find) {
 		if (!(codei>=0 && codei<IMaxChilds)) {
 			break;
 		}
-		/* 尽可能的返回更节点 */
+		/* 尽可能的返回根节点 */
 		if (node->childs[codei] == NULL) {
 			break;
 		}
@@ -1549,6 +1645,7 @@ int imapupdateunit(imap *map, iunit *unit) {
 	/* 生成新的编码 */
 	imapgencode(map, &unit->pos, &code);
 	/* 获取新编码的变更顶层节点位置, 并赋值新的编码 */
+    /* 这里只能从0级别开始，code 可能后部分一致，但是前部不一致 */
 	for(offset=0; offset<map->divide; ++offset) {
 		if (code.code[offset] != unit->code.code[offset]) {
 			break;
@@ -1619,6 +1716,37 @@ void imaprefreshunit(imap *map, iunit *unit) {
         map->maxradius = unit->radius;
     }
 #endif
+}
+
+/* 建议 divide 不要大于 10*/
+/* 加载位图阻挡信息 sizeof(blocks) == (divide*divide + 7 ) / 8 */
+void imaploadblocks(imap *map, char* blocks) {
+    /* new memory */
+    size_t size = (map->divide*map->divide + 7)/8;
+    if (map->blocks == NULL) {
+        map->blocks = icalloc(1, size);
+    }
+    memcpy(map->blocks, blocks, size);
+}
+
+/* 设置块的状态 */
+void imapsetblock(imap *map, int x, int y, int state) {
+    int cur = x * map->divide + y;
+    int idx = cur / 8;
+    int offset = cur & 8;
+    if (state == iiok) {
+        map->blocks[idx] = map->blocks[idx] | (1<<offset);
+    } else {
+        map->blocks[idx] = map->blocks[idx] & (~(1<<offset));
+    }
+}
+
+/* 获取块的状态 */
+int imapgetblock(imap *map, int x, int y) {
+    int cur = x * map->divide + y;
+    int idx = cur / 8;
+    int offset = cur & 8;
+    return (map->blocks[idx] >> offset) & 0x01;
 }
 
 /* 对一个数字做Hash:Redis */
@@ -1999,8 +2127,7 @@ void isearchresultrefreshfromsnap(imap *map, isearchresult *result) {
 	for (;joint;joint=joint->next) {
 		iunit *unit = icast(iunit, joint->value);
 		/* 是否已经处理过 */
-		int havestate = _state_is(unit->state, EnumUnitStateSearching);
-		if (havestate) {
+		if (_state_is(unit->state, EnumUnitStateSearching)) {
 			continue;
 		}
 		/* 是否满足条件 */
@@ -2102,13 +2229,20 @@ void imapsearchfromnode(imap *map, inode *node,
 			node->level, node->code.code, ireflistlen(result->units));
 }
 
-/* 收集包含指定矩形局域的节点(最多4个) */
+/* 收集包含指定矩形区域的节点(最多4个) */
 void imapsearchcollectnode(imap *map, irect *rect, ireflist *collects) {
 	icode code;
 	ipos tpos;
 	inode *tnode = NULL;
 	int i;
 	int level = map->divide;
+    int step;
+    /*
+     *^
+     *|(1)(2)
+     *|(0)(3)
+     *|__________>
+     */
 	ireal offsets[] = {rect->pos.x, rect->pos.y,
 		rect->pos.x, rect->pos.y + rect->size.h,
 		rect->pos.x + rect->size.w, rect->pos.y + rect->size.h,
@@ -2134,8 +2268,8 @@ void imapsearchcollectnode(imap *map, irect *rect, ireflist *collects) {
 			continue;
 		}
 
+        /* TODO: can use the imapmovecode to optimaze*/
 		imapgencode(map, &tpos, &code);
-
 		tnode = imapgetnode(map, &code, level, EnumFindBehaviorAccurate);
 		if (tnode && !_state_is(tnode->state, EnumNodeStateSearching)) {
 			_state_add(tnode->state, EnumNodeStateSearching);

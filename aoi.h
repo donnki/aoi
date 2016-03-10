@@ -558,16 +558,18 @@ void ifreeunitlist(iunit *unit);
 /* 节点的状态 */
 typedef enum EnumNodeState {
     EnumNodeStateNone = 0,
-    /* 查找标记，在搜索的时候回短暂的标记 */
-    EnumNodeStateSearching = 1<<11,
+    /* 查找标记，在搜索的时候会短暂的标记 */
+    EnumNodeStateSearching = 1<<5,
 
     /* 寻路的时候代表不可走，需要避开 */
     EnumNodeStateNoWalkingAble = 1<<12,
+    /* 寻路的时候代表整个可以走 */
+    EnumNodeStateWalkingAble = 1<<13,
 
     /* 节点需要Hold 住，不能释放 */
-    EnumNodeStateStatic = 1<<13,
+    EnumNodeStateStatic = 1<<23,
     /* 节点可不可以附加单元 */
-    EnumNodeStateNoUnit = 1<<14, 
+    EnumNodeStateNoUnit = 1<<24,
 }EnumNodeState;
 
 /* 是否追踪更新时间戳 */
@@ -583,6 +585,8 @@ typedef struct inode {
     icode code;
     /* 相对父节点的索引 */
     int codei;
+    /* 继承坐标系 */
+    int x, y;
     
     /* 节点状态 */
     int64_t state;
@@ -608,6 +612,14 @@ typedef struct inode {
     /* 维护一个有序的叶子节点列表非常有用 */
     struct inode *pre;
     struct inode *next;
+    
+    /*
+     * 构成了一个有向图，可在联通上做单向通行
+     * */
+    /* 所有可以到达当前节点的邻居 other ===> this */
+    ireflist *neighbors;
+    /* 可走的列表 this ===> other */
+    ireflist *neighbors_walkable;
 }inode;
 
 /* 地图状态信息，统计数据 */
@@ -652,10 +664,22 @@ typedef struct imap {
     
     /* 地图状态信息 */
     imapstate state;
+    
+    /* 存储地图的原始阻挡的位图信息 bits-map*/
+    char *blocks;
 }imap;
 
 /* 节点内存管理 */
 inode * imakenode();
+    
+/* 从节点数里面移除 */
+void ineighborsclean(inode *node);
+    
+/* 在有向图上加上一单向边 */
+void ineighborsadd(inode *node, inode *to);
+    
+/* 在有向图上移除一条单向边 */
+void ineighborsdel(inode *node, inode *to);
 
 /* 释放节点本身 */
 void ifreenode(inode *node);
@@ -675,6 +699,18 @@ int imapremoveunitfrom(imap *map, inode *node, iunit *unit, int idx, inode *stop
 /* 根据坐标生成code */
 int imapgencode(imap *map, ipos *pos, icode *code);
 
+/* 计算Code */
+/* y */
+/* ^ */
+/* | (B , D) */
+/* | (A , C) */
+/* -----------> x  */
+/* y */
+/* ^ */
+/* | ((0, 1) , (1, 1)) */
+/* | ((0, 0) , (1, 0)) */
+/* -----------> x 
+ */
 /* 从编码生成坐标 */
 int imapgenpos(imap *map, ipos *pos, icode *code);
    
@@ -689,6 +725,7 @@ typedef enum EnumCodeMove {
 /* 移动编码: 失败返回0, 成功返回移动的步骤数 */
 int imapmovecode(imap *map, icode *code, int way);
 
+/* 建议 divide 不要大于 10*/
 /* 生成一张地图数据 */
 imap *imapmake(ipos *pos, isize *size, int divide);
 
@@ -736,6 +773,10 @@ int imapupdateunit(imap *map, iunit *unit);
 /* 更新一个单元的附加信息到地图数据上：现阶段就只更新了单元的半径信息 */
 /* 如果单元改变了半径，需要调用这个函数刷新一下，才回立刻生效，不然等单位移动单元格后才生效*/
 void imaprefreshunit(imap *map, iunit *unit);
+    
+/* 加载位图阻挡信息 sizeof(blocks) == (divide*divide + 7 ) / 8 */
+void imaploadblocks(imap *map, char* blocks);
+    
 
 /* 前置声明 */
 struct ifilter;
